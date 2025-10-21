@@ -1,0 +1,828 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ChatHub - Real-Time Group Chat</title>
+    <!-- Load Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        /* Custom Font */
+        body {
+            font-family: 'Inter', sans-serif;
+            overflow: hidden; /* Prevent body scroll */
+        }
+        /* Custom scrollbar for message area */
+        #messages-area::-webkit-scrollbar {
+            width: 8px;
+        }
+        #messages-area::-webkit-scrollbar-thumb {
+            background-color: #a0aec0; /* gray-400 */
+            border-radius: 4px;
+        }
+        #messages-area::-webkit-scrollbar-track {
+            background-color: #f7fafc; /* gray-50 */
+        }
+        /* Typing Indicator Animation */
+        .dot {
+            animation: dot-bounce 0.8s infinite alternate;
+        }
+        .dot:nth-child(2) {
+            animation-delay: 0.15s;
+        }
+        .dot:nth-child(3) {
+            animation-delay: 0.3s;
+        }
+        @keyframes dot-bounce {
+            0% { transform: translateY(0); }
+            100% { transform: translateY(-5px); }
+        }
+    </style>
+</head>
+<body class="bg-gray-100 min-h-screen">
+
+    <div id="app" class="min-h-screen">
+        <!-- Application content will be rendered here -->
+    </div>
+
+    <script type="module">
+        // --- FIREBASE INITIALIZATION ---
+        // Importing necessary Firebase modules for Auth and Firestore
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, collection, query, onSnapshot, addDoc, updateDoc, deleteDoc, doc, orderBy } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+
+        // Global variables provided by the Canvas environment
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+        const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : {};
+        const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+
+        let db, auth;
+        let messagesCollectionRef = null;
+        let unsubscribeMessages = null;
+
+        if (Object.keys(firebaseConfig).length > 0) {
+            try {
+                const app = initializeApp(firebaseConfig);
+                db = getFirestore(app);
+                auth = getAuth(app);
+                
+                // Sign-in logic using the provided token or anonymously
+                if (initialAuthToken) {
+                    signInWithCustomToken(auth, initialAuthToken).catch(err => {
+                        console.error("Firebase custom token sign-in failed:", err);
+                        signInAnonymously(auth);
+                    });
+                } else {
+                    signInAnonymously(auth);
+                }
+
+                // Set up the message listener once authentication is ready
+                onAuthStateChanged(auth, (user) => {
+                    if (user) {
+                        // Public collection for messages: /artifacts/{appId}/public/data/messages
+                        messagesCollectionRef = collection(db, `artifacts/${appId}/public/data/messages`);
+                        setupRealtimeListeners();
+                    } else {
+                        messagesCollectionRef = null;
+                        if (unsubscribeMessages) unsubscribeMessages();
+                        setState({ messages: [] });
+                    }
+                });
+
+            } catch (error) {
+                console.error("Firebase initialization error. App will run in local state simulation.", error);
+            }
+        } else {
+            console.warn("Firebase configuration not found. App running in local state simulation mode.");
+        }
+
+        function setupRealtimeListeners() {
+            if (!messagesCollectionRef) return;
+            
+            // Query messages, ordered by numerical timestamp
+            const q = query(messagesCollectionRef, orderBy("timestamp", "asc"));
+            
+            if (unsubscribeMessages) unsubscribeMessages();
+
+            unsubscribeMessages = onSnapshot(q, (snapshot) => {
+                const firestoreMessages = [];
+                snapshot.forEach((doc) => {
+                    const data = doc.data();
+                    firestoreMessages.push({ id: doc.id, ...data });
+                });
+
+                // System messages (join/leave) are local, persist them locally
+                const systemMessages = appState.messages.filter(msg => msg.type === 'system');
+                
+                setState({ messages: [...systemMessages, ...firestoreMessages] }, scrollToBottom);
+            }, (error) => {
+                console.error("Error listening to messages:", error);
+                setState({ messages: appState.messages.filter(msg => msg.type === 'system') });
+            });
+        }
+        // --- END FIREBASE INITIALIZATION ---
+
+        // --- ICON UTILITY (Using inline SVGs) ---
+        const getIcon = (name, classes = "w-5 h-5") => {
+            const icons = {
+                MessageCircle: `<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M7.9 20A9 9 0 0 1 4 16.1L2 19l3.9-2v-1.2A9 9 0 0 1 20 12V3a9 9 0 0 0-9 9 9 9 0 0 0-3.1 8Z"/><path d="M12 3a9 9 0 0 0 9 9"/></svg>`,
+                Send: `<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m22 2-7 20-4-9-9-4Z"/><path d="M22 2 11 13"/></svg>`,
+                Users: `<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>`,
+                Smile: `<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M8 14s1.5 2 4 2 4-2 4-2"/><path d="M9 9h.01"/><path d="M15 9h.01"/></svg>`,
+                Trash2: `<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6"/><path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2"/><line x1="10" x2="10" y1="11" y2="17"/><line x1="14" x2="14" y1="11" y2="17"/></svg>`,
+                Edit2: `<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 3a2.85 2.85 0 0 1 4 4L14 18l-5 5-1.5-1.5L16 7Z"/><path d="M19 4 15 8"/><path d="m14 11-2-2"/></svg>`,
+                Check: `<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>`,
+                X: `<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>`,
+                LogOut: `<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" x2="9" y1="12" y2="12"/></svg>`,
+                UserPlus: `<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><line x1="19" x2="19" y1="8" y2="14"/><line x1="22" x2="16" y1="11" y2="11"/></svg>`,
+                LogIn: `<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4"/><polyline points="10 17 15 12 10 7"/><line x1="15" x2="3" y1="12" y2="12"/></svg>`
+            };
+            return `<span class="${classes}">${icons[name] || ''}</span>`;
+        };
+
+        // --- GLOBAL STATE SIMULATION (for Authentication/UI) ---
+        const appState = {
+            messages: [],
+            newMessage: '',
+            currentUser: null,
+            authMode: 'login',
+            loginEmail: '',
+            loginPassword: '',
+            signupEmail: '',
+            signupPassword: '',
+            signupUsername: '',
+            signupConfirmPassword: '',
+            authError: '',
+            // Mock authentication data - UPDATED USER NAMES
+            registeredUsers: [
+                { email: 'devast@chat.com', password: 'demo123', username: 'devast' },
+                { email: 'zeph@chat.com', password: 'password', username: 'zeph' }
+            ],
+            onlineUsers: [],
+            editingMessageId: null,
+            editText: '',
+            replyTo: null,
+            showEmojiPicker: false,
+            isTyping: false,
+            typingUsers: [], 
+            emojis: ['😀', '😂', '❤️', '👍', '🎉', '🔥', '✨', '💯', '🚀', '👋', '😊', '🤔', '😎', '🙌', '💪'],
+            typingTimeout: null
+        };
+
+        // --- STATE MANIPULATION AND RENDERING FUNCTIONS ---
+
+        function setState(newState, callback = () => {}) {
+            Object.assign(appState, newState);
+            renderApp();
+            callback();
+        }
+
+        function scrollToBottom() {
+            const messagesArea = document.getElementById('messages-area');
+            if (messagesArea) {
+                requestAnimationFrame(() => {
+                    messagesArea.scrollTop = messagesArea.scrollHeight;
+                });
+            }
+        }
+
+        function updateOnlineUsers() {
+            if (appState.currentUser) {
+                const isOnline = appState.onlineUsers.some(u => u.email === appState.currentUser.email);
+                if (!isOnline) {
+                    setState({ onlineUsers: [...appState.onlineUsers, appState.currentUser] });
+                }
+            }
+        }
+
+        // --- AUTH LOGIC (Mocked for Demo) ---
+
+        function validateEmail(email) {
+            return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
+        }
+
+        window.handleLogin = (e) => {
+            e.preventDefault();
+            const { loginEmail, loginPassword, registeredUsers } = appState;
+            
+            if (!loginEmail || !loginPassword) {
+                setState({ authError: 'Please fill in all fields' });
+                return;
+            }
+
+            const user = registeredUsers.find(
+                u => u.email === loginEmail && u.password === loginPassword
+            );
+
+            if (user) {
+                const systemMsg = {
+                    id: Date.now(),
+                    type: 'system',
+                    text: `${user.username} joined the chat`,
+                    timestamp: Date.now() 
+                };
+                setState({
+                    currentUser: user,
+                    messages: [...appState.messages.filter(msg => msg.type === 'user'), systemMsg],
+                    loginEmail: '',
+                    loginPassword: '',
+                    authError: ''
+                }, updateOnlineUsers);
+            } else {
+                setState({ authError: 'Invalid email or password' });
+            }
+        };
+
+        window.handleSignup = (e) => {
+            e.preventDefault();
+            const { signupEmail, signupPassword, signupUsername, signupConfirmPassword, registeredUsers } = appState;
+
+            if (!signupEmail || !signupPassword || !signupUsername || !signupConfirmPassword) {
+                setState({ authError: 'Please fill in all fields' });
+                return;
+            }
+            if (signupPassword !== signupConfirmPassword) {
+                setState({ authError: 'Passwords do not match' });
+                return;
+            }
+            if (registeredUsers.find(u => u.email === signupEmail) || registeredUsers.find(u => u.username === signupUsername)) {
+                setState({ authError: 'Email or Username already taken' });
+                return;
+            }
+
+            const newUser = {
+                email: signupEmail,
+                password: signupPassword,
+                username: signupUsername
+            };
+
+            const systemMsg = {
+                id: Date.now(),
+                type: 'system',
+                text: `${newUser.username} joined the chat`,
+                timestamp: Date.now()
+            };
+
+            setState({
+                registeredUsers: [...registeredUsers, newUser],
+                currentUser: newUser,
+                messages: [...appState.messages.filter(msg => msg.type === 'user'), systemMsg],
+                signupEmail: '',
+                signupPassword: '',
+                signupUsername: '',
+                signupConfirmPassword: '',
+                authError: ''
+            }, updateOnlineUsers);
+        };
+
+        window.handleLogout = () => {
+            const systemMsg = {
+                id: Date.now(),
+                type: 'system',
+                text: `${appState.currentUser.username} left the chat`,
+                timestamp: Date.now()
+            };
+            setState({
+                messages: [...appState.messages.filter(msg => msg.type === 'user'), systemMsg],
+                onlineUsers: appState.onlineUsers.filter(u => u.email !== appState.currentUser.email),
+                currentUser: null
+            });
+            if (unsubscribeMessages) unsubscribeMessages();
+        };
+
+        window.setAuthMode = (mode) => {
+            setState({ authMode: mode, authError: '' });
+        };
+
+        // --- CHAT LOGIC (Firestore Integration) ---
+
+        window.handleSendMessage = async (e) => {
+            e.preventDefault();
+            const { newMessage, currentUser, replyTo } = appState;
+            
+            if (!currentUser || !messagesCollectionRef) {
+                console.error("Chat service not initialized.");
+                return;
+            }
+
+            if (newMessage.trim()) {
+                const message = {
+                    text: newMessage,
+                    username: currentUser.username,
+                    email: currentUser.email,
+                    timestamp: Date.now(), // Numerical timestamp for sorting
+                    reactions: [],
+                    replyTo: replyTo ? {
+                        username: replyTo.username,
+                        text: replyTo.text,
+                        id: replyTo.id 
+                    } : null,
+                    type: 'user'
+                };
+                
+                // Clear local typing state
+                const updatedTypingUsers = appState.typingUsers.filter(user => user !== currentUser.username);
+                clearTimeout(appState.typingTimeout);
+                
+                setState({
+                    newMessage: '',
+                    replyTo: null,
+                    isTyping: false,
+                    typingUsers: updatedTypingUsers,
+                    typingTimeout: null
+                });
+
+                try {
+                    await addDoc(messagesCollectionRef, message);
+                } catch(error) {
+                    console.error("Error sending message to Firestore: ", error);
+                }
+            }
+        };
+
+        window.handleTyping = (e) => {
+            const newValue = e.target.value;
+            setState({ newMessage: newValue });
+
+            const { isTyping, currentUser, typingTimeout } = appState;
+            
+            if (!isTyping) {
+                setState({
+                    isTyping: true,
+                    typingUsers: [...new Set([...appState.typingUsers, currentUser.username])]
+                });
+            }
+
+            clearTimeout(typingTimeout);
+            const newTimeout = setTimeout(() => {
+                const updatedTypingUsers = appState.typingUsers.filter(user => user !== currentUser.username);
+                setState({
+                    isTyping: false,
+                    typingUsers: updatedTypingUsers,
+                    typingTimeout: null
+                });
+            }, 1000);
+            
+            setState({ typingTimeout: newTimeout });
+        };
+
+        window.handleDeleteMessage = async (messageId) => {
+            if (!messagesCollectionRef) return;
+            try {
+                const docRef = doc(db, messagesCollectionRef.path, messageId);
+                await deleteDoc(docRef);
+            } catch(error) {
+                console.error("Error deleting message: ", error);
+            }
+        };
+
+        window.handleEditMessage = (messageId, text) => {
+            setState({
+                editingMessageId: messageId,
+                editText: text
+            });
+        };
+
+        window.handleSaveEdit = async (messageId) => {
+            if (!messagesCollectionRef) return;
+            try {
+                const docRef = doc(db, messagesCollectionRef.path, messageId);
+                await updateDoc(docRef, {
+                    text: appState.editText,
+                    edited: true
+                });
+                setState({ editingMessageId: null, editText: '' });
+            } catch(error) {
+                console.error("Error updating message: ", error);
+            }
+        };
+        
+        window.handleCancelEdit = () => {
+            setState({ editingMessageId: null, editText: '' });
+        };
+
+        window.handleReaction = async (messageId, emoji) => {
+            if (!messagesCollectionRef) return;
+            try {
+                const msg = appState.messages.find(m => m.id === messageId);
+                if (!msg) return;
+
+                const reactions = [...(msg.reactions || [])];
+                const existingIndex = reactions.findIndex(r => r.emoji === emoji && r.user === appState.currentUser.username);
+
+                if (existingIndex > -1) {
+                    reactions.splice(existingIndex, 1);
+                } else {
+                    reactions.push({ emoji, user: appState.currentUser.username });
+                }
+                
+                const docRef = doc(db, messagesCollectionRef.path, messageId);
+                await updateDoc(docRef, { reactions });
+            } catch(error) {
+                console.error("Error handling reaction: ", error);
+            }
+        };
+
+        window.setReplyTo = (msg) => {
+            setState({ replyTo: msg });
+        };
+
+        window.clearReplyTo = () => {
+            setState({ replyTo: null });
+        };
+
+        window.addEmoji = (emoji) => {
+            setState({
+                newMessage: appState.newMessage + emoji,
+                showEmojiPicker: false
+            });
+            document.getElementById('message-input')?.focus();
+        };
+
+        window.toggleEmojiPicker = () => {
+            setState({ showEmojiPicker: !appState.showEmojiPicker });
+        };
+
+        // --- RENDER UTILITIES ---
+
+        function renderMessage(msg) {
+            const { currentUser, editingMessageId, editText } = appState;
+            // Handle system messages separately
+            if (msg.type === 'system') {
+                const displayTimestamp = new Date(msg.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+                return `
+                    <div class="flex justify-center">
+                        <span class="text-xs text-gray-500 bg-gray-200 px-3 py-1 rounded-full shadow-sm">
+                            ${msg.text} - ${displayTimestamp}
+                        </span>
+                    </div>
+                `;
+            }
+
+            const isOwnMessage = msg.email === currentUser.email;
+            const displayTimestamp = new Date(msg.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+            
+            // Group reactions by emoji
+            const reactionGroups = msg.reactions?.reduce((acc, r) => {
+                acc[r.emoji] = (acc[r.emoji] || 0) + 1;
+                return acc;
+            }, {});
+
+            const messageHtml = `
+                <div class="flex ${isOwnMessage ? 'justify-end' : 'justify-start'} group">
+                    <div class="max-w-md ${isOwnMessage ? 'items-end' : 'items-start'} flex flex-col">
+
+                        ${!isOwnMessage ? `<span class="text-xs font-semibold text-gray-600 mb-1 ml-3">${msg.username}</span>` : ''}
+                        
+                        ${msg.replyTo ? `
+                            <div class="text-xs text-gray-500 bg-gray-200 px-3 py-1 rounded-lg mb-1 ml-3 mr-3 shadow-sm">
+                                <span class="font-medium text-gray-700">Replying to ${msg.replyTo.username}:</span> ${msg.replyTo.text.substring(0, 50)}${msg.replyTo.text.length > 50 ? '...' : ''}
+                            </div>
+                        ` : ''}
+
+                        <div class="relative rounded-2xl px-4 py-2 shadow-md
+                            ${isOwnMessage ? 'bg-gradient-to-r from-blue-600 to-cyan-600 text-white' : 'bg-white text-gray-800 border border-gray-200'}"
+                        >
+                            ${editingMessageId === msg.id ? `
+                                <div class="flex items-center gap-2">
+                                    <input
+                                        type="text"
+                                        value="${editText}"
+                                        oninput="setState({editText: this.value})"
+                                        class="bg-white text-gray-800 px-2 py-1 rounded border-2 border-blue-500 w-full"
+                                    />
+                                    <button onclick="handleSaveEdit('${msg.id}')" class="text-green-300 hover:text-green-100 p-1">
+                                        ${getIcon('Check', 'w-4 h-4')}
+                                    </button>
+                                    <button onclick="handleCancelEdit()" class="text-red-300 hover:text-red-100 p-1">
+                                        ${getIcon('X', 'w-4 h-4')}
+                                    </button>
+                                </div>
+                            ` : `
+                                <p class="break-words">${msg.text}</p>
+                                ${msg.edited ? `<span class="text-xs opacity-70 ml-2 italic ${isOwnMessage ? 'text-blue-100' : 'text-gray-400'}">(edited)</span>` : ''}
+                            `}
+                            
+                            <span class="text-xs ${isOwnMessage ? 'text-blue-100' : 'text-gray-500'} mt-1 block">
+                                ${displayTimestamp}
+                            </span>
+
+                            <!-- Message Actions (Delete/Edit for Self, Reply for Others) -->
+                            ${isOwnMessage && !editingMessageId ? `
+                                <div class="absolute -left-20 top-1/2 -translate-y-1/2 opacity-0 group-hover:opacity-100 transition-opacity flex gap-1">
+                                    <button onclick="handleEditMessage('${msg.id}', '${msg.text.replace(/'/g, "\\'")}')" class="bg-gray-700 text-white p-1.5 rounded-full hover:bg-gray-800" title="Edit">
+                                        ${getIcon('Edit2', 'w-3 h-3')}
+                                    </button>
+                                    <button onclick="handleDeleteMessage('${msg.id}')" class="bg-red-500 text-white p-1.5 rounded-full hover:bg-red-600" title="Delete">
+                                        ${getIcon('Trash2', 'w-3 h-3')}
+                                    </button>
+                                </div>
+                            ` : !isOwnMessage ? `
+                                <button onclick="setReplyTo(${JSON.stringify(msg).replace(/'/g, "\\'")})" class="absolute -right-10 top-1/2 -translate-y-1/2 opacity-0 group-hover:opacity-100 transition-opacity bg-gray-700 text-white p-1.5 rounded-full hover:bg-gray-800" title="Reply">
+                                    ${getIcon('MessageCircle', 'w-3 h-3')}
+                                </button>
+                            ` : ''}
+
+                            <!-- Quick Reactions for Hovered Message -->
+                            <div class="flex gap-1 mt-1 opacity-0 group-hover:opacity-100 transition-opacity">
+                                ${['❤️', '👍', '😂', '🎉'].map(emoji => `
+                                    <button
+                                        onclick="handleReaction('${msg.id}', '${emoji}')"
+                                        class="hover:scale-125 transition-transform text-sm"
+                                    >
+                                        ${emoji}
+                                    </button>
+                                `).join('')}
+                            </div>
+                        </div>
+
+                        <!-- Display Reactions -->
+                        ${reactionGroups && Object.keys(reactionGroups).length > 0 ? `
+                            <div class="flex gap-1 mt-1 flex-wrap ${isOwnMessage ? 'mr-3' : 'ml-3'}">
+                                ${Object.entries(reactionGroups).map(([emoji, count]) => `
+                                    <button
+                                        onclick="handleReaction('${msg.id}', '${emoji}')"
+                                        class="bg-gray-200 text-gray-800 text-xs px-2 py-0.5 rounded-full shadow-sm hover:bg-gray-300"
+                                    >
+                                        ${emoji} ${count}
+                                    </button>
+                                `).join('')}
+                            </div>
+                        ` : ''}
+
+                    </div>
+                </div>
+            `;
+            return messageHtml;
+        }
+
+        // --- MAIN RENDER FUNCTIONS ---
+
+        function renderAuth() {
+            const { authMode, authError, loginEmail, loginPassword, signupEmail, signupPassword, signupUsername, signupConfirmPassword } = appState;
+            
+            const isLogin = authMode === 'login';
+
+            const authHtml = `
+                <div class="min-h-screen bg-gradient-to-br from-purple-600 via-blue-600 to-cyan-500 flex items-center justify-center p-4">
+                    <div class="bg-white rounded-2xl shadow-2xl p-8 max-w-md w-full">
+                        <div class="flex items-center justify-center mb-6 text-blue-600">
+                            ${getIcon('MessageCircle', 'w-16 h-16')}
+                        </div>
+                        <h1 class="text-3xl font-bold text-center mb-2 text-gray-800">Welcome to ChatHub</h1>
+                        <p class="text-center text-gray-600 mb-8">
+                            ${isLogin ? 'Sign in to your account' : 'Create a new account'}
+                        </p>
+
+                        <!-- Toggle Auth Mode -->
+                        <div class="flex gap-2 mb-6">
+                            <button
+                                onclick="setAuthMode('login')"
+                                class="flex-1 py-2 rounded-lg font-semibold transition-all ${
+                                    isLogin
+                                        ? 'bg-blue-600 text-white'
+                                        : 'bg-gray-200 text-gray-700 hover:bg-gray-300'
+                                }"
+                            >
+                                ${getIcon('LogIn', 'w-4 h-4 inline mr-2')}
+                                Login
+                            </button>
+                            <button
+                                onclick="setAuthMode('signup')"
+                                class="flex-1 py-2 rounded-lg font-semibold transition-all ${
+                                    !isLogin
+                                        ? 'bg-blue-600 text-white'
+                                        : 'bg-gray-200 text-gray-700 hover:bg-gray-300'
+                                }"
+                            >
+                                ${getIcon('UserPlus', 'w-4 h-4 inline mr-2')}
+                                Sign Up
+                            </button>
+                        </div>
+
+                        ${authError ? `
+                            <div class="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded-lg mb-4">
+                                ${authError}
+                            </div>
+                        ` : ''}
+
+                        <form onsubmit="${isLogin ? 'handleLogin(event)' : 'handleSignup(event)'}">
+                            ${!isLogin ? `
+                                <div class="mb-4">
+                                    <label class="block text-gray-700 text-sm font-semibold mb-2">Username</label>
+                                    <input
+                                        type="text"
+                                        value="${signupUsername}"
+                                        oninput="setState({signupUsername: this.value})"
+                                        placeholder="Choose a username"
+                                        class="w-full px-4 py-3 border-2 border-gray-300 rounded-lg focus:outline-none focus:border-blue-500"
+                                        maxlength="20"
+                                    />
+                                </div>
+                            ` : ''}
+                            <div class="mb-4">
+                                <label class="block text-gray-700 text-sm font-semibold mb-2">Email</label>
+                                <input
+                                    type="email"
+                                    value="${isLogin ? loginEmail : signupEmail}"
+                                    oninput="setState({${isLogin ? 'loginEmail' : 'signupEmail'}: this.value})"
+                                    placeholder="Enter your email"
+                                    class="w-full px-4 py-3 border-2 border-gray-300 rounded-lg focus:outline-none focus:border-blue-500"
+                                />
+                            </div>
+                            <div class="mb-4">
+                                <label class="block text-gray-700 text-sm font-semibold mb-2">Password</label>
+                                <input
+                                    type="password"
+                                    value="${isLogin ? loginPassword : signupPassword}"
+                                    oninput="setState({${isLogin ? 'loginPassword' : 'signupPassword'}: this.value})"
+                                    placeholder="${isLogin ? 'Enter your password' : 'Create a password (min 6 characters)'}"
+                                    class="w-full px-4 py-3 border-2 border-gray-300 rounded-lg focus:outline-none focus:border-blue-500"
+                                />
+                            </div>
+                            ${!isLogin ? `
+                                <div class="mb-6">
+                                    <label class="block text-gray-700 text-sm font-semibold mb-2">Confirm Password</label>
+                                    <input
+                                        type="password"
+                                        value="${signupConfirmPassword}"
+                                        oninput="setState({signupConfirmPassword: this.value})"
+                                        placeholder="Confirm your password"
+                                        class="w-full px-4 py-3 border-2 border-gray-300 rounded-lg focus:outline-none focus:border-blue-500"
+                                    />
+                                </div>
+                            ` : ''}
+                            <button
+                                type="submit"
+                                class="w-full bg-gradient-to-r from-blue-600 to-cyan-600 text-white py-3 rounded-lg font-semibold hover:from-blue-700 hover:to-cyan-700 transition-all transform hover:scale-105"
+                            >
+                                ${isLogin ? 'Login' : 'Create Account'}
+                            </button>
+                            ${isLogin ? `
+                                <div class="mt-4 text-center text-sm text-gray-600">
+                                    Demo users: <span class="font-mono bg-gray-100 px-2 py-1 rounded">devast</span> and <span class="font-mono bg-gray-100 px-2 py-1 rounded">zeph</span>.
+                                    Password: <span class="font-mono bg-gray-100 px-2 py-1 rounded">demo123</span> (for devast) or <span class="font-mono bg-gray-100 px-2 py-1 rounded">password</span> (for zeph).
+                                </div>
+                            ` : ''}
+                        </form>
+                    </div>
+                </div>
+            `;
+            document.getElementById('app').innerHTML = authHtml;
+        }
+
+        function renderChat() {
+            const { currentUser, messages, onlineUsers, newMessage, replyTo, showEmojiPicker, emojis, typingUsers } = appState;
+            
+            const nonCurrentUserTyping = typingUsers.filter(u => u !== currentUser.username);
+            
+            const chatHtml = `
+                <div class="min-h-screen bg-gradient-to-br from-purple-600 via-blue-600 to-cyan-500 p-4">
+                    <div class="max-w-6xl mx-auto h-[calc(100vh-2rem)] flex gap-4">
+                        <!-- Main Chat Area -->
+                        <div class="flex-1 bg-white rounded-2xl shadow-2xl flex flex-col overflow-hidden">
+                            <!-- Header -->
+                            <div class="bg-gradient-to-r from-blue-600 to-cyan-600 text-white p-4 flex items-center justify-between shadow-lg">
+                                <div class="flex items-center gap-3">
+                                    ${getIcon('MessageCircle', 'w-8 h-8')}
+                                    <div>
+                                        <h1 class="text-xl font-bold">ChatHub</h1>
+                                        <p class="text-sm text-blue-100">Logged in as ${currentUser.username}</p>
+                                    </div>
+                                </div>
+                                <div class="flex items-center gap-4">
+                                    <div class="flex items-center gap-2 bg-white/20 px-3 py-1 rounded-full">
+                                        ${getIcon('Users', 'w-4 h-4')}
+                                        <span class="text-sm font-semibold">${onlineUsers.length} online</span>
+                                    </div>
+                                    <button
+                                        onclick="handleLogout()"
+                                        class="flex items-center gap-2 bg-red-500 hover:bg-red-600 px-4 py-2 rounded-lg transition-colors shadow-md"
+                                    >
+                                        ${getIcon('LogOut', 'w-4 h-4')}
+                                        Logout
+                                    </button>
+                                </div>
+                            </div>
+
+                            <!-- Messages Area -->
+                            <div id="messages-area" class="flex-1 overflow-y-auto p-4 space-y-4 bg-gray-50">
+                                ${messages.map(renderMessage).join('')}
+                                <div id="messages-end-ref"></div>
+
+                                <!-- Typing Indicator -->
+                                ${nonCurrentUserTyping.length > 0 ? `
+                                    <div class="flex items-center gap-2 text-gray-500 text-sm p-2 bg-white rounded-lg shadow-sm w-fit">
+                                        <div class="flex gap-1">
+                                            <span class="dot w-2 h-2 bg-gray-400 rounded-full"></span>
+                                            <span class="dot w-2 h-2 bg-gray-400 rounded-full" style="animation-delay: 0.15s"></span>
+                                            <span class="dot w-2 h-2 bg-gray-400 rounded-full" style="animation-delay: 0.3s"></span>
+                                        </div>
+                                        <span>${nonCurrentUserTyping.join(', ')} typing...</span>
+                                    </div>
+                                ` : ''}
+                            </div>
+
+                            <!-- Reply Preview -->
+                            ${replyTo ? `
+                                <div class="bg-blue-50 px-4 py-2 flex items-center justify-between border-t border-blue-200 shadow-inner">
+                                    <div class="text-sm">
+                                        <span class="font-bold text-blue-700">Replying to ${replyTo.username}:</span>
+                                        <span class="text-gray-600 italic ml-2">"${replyTo.text.substring(0, 50)}${replyTo.text.length > 50 ? '...' : ''}"</span>
+                                    </div>
+                                    <button onclick="clearReplyTo()" class="text-gray-500 hover:text-red-500 p-1 rounded-full bg-white transition-colors">
+                                        ${getIcon('X', 'w-4 h-4')}
+                                    </button>
+                                </div>
+                            ` : ''}
+
+                            <!-- Emoji Picker -->
+                            ${showEmojiPicker ? `
+                                <div class="bg-white border-t border-gray-200 px-4 py-2 shadow-inner">
+                                    <div class="flex flex-wrap gap-2">
+                                        ${emojis.map(emoji => `
+                                            <button
+                                                onclick="addEmoji('${emoji}')"
+                                                class="text-2xl hover:scale-125 transition-transform p-1 rounded-lg"
+                                            >
+                                                ${emoji}
+                                            </button>
+                                        `).join('')}
+                                    </div>
+                                </div>
+                            ` : ''}
+
+                            <!-- Input Area -->
+                            <form onsubmit="handleSendMessage(event)" class="bg-white border-t border-gray-200 p-4 shadow-2xl">
+                                <div class="flex gap-2">
+                                    <button
+                                        type="button"
+                                        onclick="toggleEmojiPicker()"
+                                        class="p-3 text-gray-500 hover:text-blue-600 hover:bg-blue-50 rounded-lg transition-colors"
+                                        title="Emoji"
+                                    >
+                                        ${getIcon('Smile', 'w-5 h-5')}
+                                    </button>
+                                    <input
+                                        id="message-input"
+                                        type="text"
+                                        value="${newMessage}"
+                                        oninput="handleTyping(event)"
+                                        placeholder="Type a message..."
+                                        class="flex-1 px-4 py-3 border-2 border-gray-300 rounded-lg focus:outline-none focus:border-blue-500"
+                                    />
+                                    <button
+                                        type="submit"
+                                        class="bg-gradient-to-r from-blue-600 to-cyan-600 text-white px-6 py-3 rounded-lg font-semibold hover:from-blue-700 hover:to-cyan-700 transition-all transform hover:scale-105 flex items-center gap-2 shadow-lg"
+                                    >
+                                        ${getIcon('Send', 'w-5 h-5')}
+                                        Send
+                                    </button>
+                                </div>
+                            </form>
+                        </div>
+
+                        <!-- Online Users Sidebar -->
+                        <div class="w-64 bg-white rounded-2xl shadow-2xl p-4 flex flex-col h-full">
+                            <h2 class="text-lg font-bold text-gray-800 mb-4 flex items-center gap-2 border-b pb-2">
+                                ${getIcon('Users', 'w-5 h-5 text-blue-600')}
+                                Online Users
+                            </h2>
+                            <div class="space-y-2 overflow-y-auto">
+                                ${onlineUsers.map(user => `
+                                    <div class="flex items-center gap-3 p-2 rounded-lg ${user.email === currentUser.email ? 'bg-blue-50' : 'hover:bg-gray-50'} transition-colors">
+                                        <div class="w-10 h-10 rounded-full bg-gradient-to-br from-blue-400 to-cyan-400 flex items-center justify-center text-white font-semibold flex-shrink-0">
+                                            ${user.username[0].toUpperCase()}
+                                        </div>
+                                        <div class="flex-1 min-w-0">
+                                            <div class="font-medium text-gray-800 truncate" title="${user.username}">${user.username}</div>
+                                            <div class="flex items-center gap-1 text-xs ${user.email === currentUser.email ? 'text-blue-600' : 'text-green-600'}">
+                                                <div class="w-2 h-2 ${user.email === currentUser.email ? 'bg-blue-500' : 'bg-green-500'} rounded-full"></div>
+                                                ${user.email === currentUser.email ? 'You' : 'Active now'}
+                                            </div>
+                                        </div>
+                                    </div>
+                                `).join('')}
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            `;
+            document.getElementById('app').innerHTML = chatHtml;
+            setTimeout(scrollToBottom, 50); 
+        }
+
+        // --- INITIALIZATION ---
+        function renderApp() {
+            if (appState.currentUser) {
+                renderChat();
+            } else {
+                renderAuth();
+            }
+        }
+
+        renderApp();
+    </script>
+</body>
+</html>
